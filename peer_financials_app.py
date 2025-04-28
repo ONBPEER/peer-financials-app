@@ -1,70 +1,113 @@
 import streamlit as st
+import requests
 import pandas as pd
+import io
 
-# Title
-st.title("Peer Financials Lookup Tool")
+# -- SETTINGS --
+COMPANIES_HOUSE_API_KEY = st.secrets["companies_house_api_key"]
+BASE_URL = "https://api.company-information.service.gov.uk"
 
-# User Input
-company_input = st.text_input("Enter a public company name to find peers:")
+# -- FUNCTIONS --
 
-# Dummy peer data for demo purposes
-# In a real deployment, this would be replaced with a dynamic lookup
-if company_input:
-    peers_data = {
-        "Metric": [
-            "Revenue (Bn USD)",
-            "Revenue Growth YoY (%)",
-            "EBITDA (Bn USD)",
-            "EBITDA Margin (%)"
-        ],
-        f"{company_input} (2023)": [34.90, 3.0, 7.80, 22.4],
-        f"{company_input} (2024)": [36.00, 3.2, 8.10, 22.5],
-        "MSA Safety (2023)": [1.40, 5.3, 0.28, 20.0],
-        "MSA Safety (2024)": [1.47, 5.0, 0.30, 20.4],
-        "3M Company (2023)": [32.10, 1.2, 7.00, 21.8],
-        "3M Company (2024)": [32.50, 1.2, 7.10, 21.8],
-        "Joyson Safety (2023)": [7.20, 4.0, 1.10, 15.3],
-        "Joyson Safety (2024)": [7.50, 4.2, 1.15, 15.3],
-        "Avon Protection (2023)": [0.30, -3.2, 0.06, 20.0],
-        "Avon Protection (2024)": [0.32, 6.7, 0.07, 21.9]
+def search_company(name):
+    url = f"{BASE_URL}/search/companies?q={name}"
+    response = requests.get(url, auth=(COMPANIES_HOUSE_API_KEY, ''))
+    if response.status_code == 200:
+        items = response.json().get("items", [])
+        if items:
+            return items[0]["company_number"], items[0]["title"]
+    return None, None
+
+def get_company_info(company_number):
+    url = f"{BASE_URL}/company/{company_number}"
+    response = requests.get(url, auth=(COMPANIES_HOUSE_API_KEY, ''))
+    if response.status_code == 200:
+        return response.json()
+    return {}
+
+def get_latest_accounts(company_number):
+    url = f"{BASE_URL}/company/{company_number}/filing-history?category=accounts"
+    response = requests.get(url, auth=(COMPANIES_HOUSE_API_KEY, ''))
+    if response.status_code == 200:
+        items = response.json().get("items", [])
+        financials = []
+        for item in items:
+            if 'description' in item and 'links' in item:
+                date = item.get('date', 'Unknown Date')
+                description = item.get('description', 'No Description')
+                financials.append({
+                    'Date': date,
+                    'Description': description
+                })
+        return financials
+    return []
+
+def mock_financials():
+    """Mocked financial data for display (Replace with real parser if available)."""
+    import random
+    years = ['2022', '2021', '2020']
+    data = {
+        "Year": years,
+        "Revenue (£)": [random.randint(10, 50) * 1_000_000 for _ in years],
+        "Net Profit (£)": [random.randint(1, 10) * 1_000_000 for _ in years],
+        "Total Assets (£)": [random.randint(50, 200) * 1_000_000 for _ in years]
     }
+    return pd.DataFrame(data)
 
-    df = pd.DataFrame(peers_data)
+def get_peers_mock(company_name):
+    """Mocked peer companies - can later link based on SIC code."""
+    return [f"{company_name} Holdings Ltd", f"{company_name} Global Ltd", f"{company_name} Solutions Plc"]
 
-    # Description Table
-    descriptions = {
-        "Company": [
-            company_input,
-            "MSA Safety",
-            "3M Company",
-            "Joyson Safety",
-            "Avon Protection"
-        ],
-        "Business Description": [
-            f"{company_input} is a global technology and manufacturing company offering safety and productivity solutions.",
-            "MSA Safety designs and manufactures industry-leading safety products including gas detection and fall protection.",
-            "3M offers personal protective equipment including respirators, eyewear, and fall protection solutions.",
-            "Joyson Safety produces automotive safety systems like airbags and seatbelts for OEMs worldwide.",
-            "Avon Protection makes high-performance protective gear for military, law enforcement, and industrial markets."
-        ]
-    }
+# -- STREAMLIT APP --
 
-    desc_df = pd.DataFrame(descriptions)
+st.title("📊 Peer Financials Benchmarking (UK) — Premium Version")
 
-    # Show tables
-    st.subheader("Business Descriptions")
-    st.dataframe(desc_df)
+company_name = st.text_input("Enter a Company Name:")
 
-    st.subheader("Peer Financials")
-    st.dataframe(df)
+if st.button("Find Peers and Financials"):
+    if not company_name:
+        st.error("Please enter a valid company name.")
+    else:
+        company_number, matched_name = search_company(company_name)
+        
+        if company_number:
+            st.success(f"Found Company: {matched_name} (No. {company_number})")
+            
+            company_info = get_company_info(company_number)
+            peers = get_peers_mock(company_name)
+            financials_df = mock_financials()
+            
+            st.subheader("🏢 Company Description:")
+            st.write(company_info.get("sic_codes", ["No description available"]))
+            
+            st.subheader("👥 Suggested Peers:")
+            st.write(", ".join(peers))
+            
+            st.subheader("📈 Financials (Mocked Data for Now)")
+            st.dataframe(financials_df)
+            
+            st.subheader("📊 Financial Trends:")
+            st.line_chart(financials_df.set_index('Year')[["Revenue (£)", "Net Profit (£)", "Total Assets (£)"]])
+            
+            # Download Excel
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                financials_df.to_excel(writer, index=False, sheet_name='Financials')
+                worksheet = writer.sheets['Financials']
+                for idx, col in enumerate(financials_df):
+                    series = financials_df[col]
+                    max_len = max((
+                        series.astype(str).map(len).max(),
+                        len(str(series.name))
+                    )) + 2
+                    worksheet.set_column(idx, idx, max_len)
+            st.download_button(
+                label="📥 Download Financials as Excel",
+                data=output.getvalue(),
+                file_name=f"{company_name}_financials.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            
+        else:
+            st.error("Company not found. Try a slightly different spelling.")
 
-    # CSV Download
-    csv = df.to_csv(index=False)
-    st.download_button(
-        label="Download Financials as CSV",
-        data=csv,
-        file_name=f"{company_input}_Peer_Financials.csv",
-        mime='text/csv'
-    )
-else:
-    st.info("Enter a company name above to generate the peer data.")
